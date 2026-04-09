@@ -365,9 +365,9 @@ function buildButtons(orderId) {
   );
 }
 
-function buildOrderEmbed({ vendor, brand, part, model, qty, po, notes, status, callSid, error }) {
+function buildOrderEmbed({ vendor, brand, part, model, qty, po, notes, status, callSid, error, liveStatus }) {
   const colors = { pending:0x378ADD, calling:0xEF9F27, placed:0x1D9E75, completed:0x1D9E75, cancelled:0x888780, error:0xE24B4A };
-  const labels = { pending:'⏳ Awaiting confirmation', calling:'📞 Placing call...', placed:'📞 Call placed', completed:'✅ Completed', cancelled:'🚫 Cancelled', error:'❌ Error' };
+  const labels = { pending:'⏳ Awaiting confirmation', calling: liveStatus ? `📞 Alex on the line — ${liveStatus}` : '📞 Alex is on the line...', placed:'📞 Call placed', completed:'✅ Call completed — check dashboard', cancelled:'🚫 Cancelled', error:'❌ Error' };
 
   const embed = new EmbedBuilder()
     .setColor(colors[status] || 0x378ADD)
@@ -393,17 +393,72 @@ function buildOrderEmbed({ vendor, brand, part, model, qty, po, notes, status, c
 
 async function pollCallStatus(callSid, interaction, order) {
   let polls = 0;
+  // Poll every 5 seconds for up to 10 minutes (120 polls)
+  // OpenAI Realtime calls can run several minutes
+  const MAX_POLLS    = 120;
+  const POLL_INTERVAL = 5000;
+
+  // Terminal statuses from Twilio
+  const TERMINAL = ['completed','failed','busy','no-answer','canceled'];
+
   const interval = setInterval(async () => {
     polls++;
     try {
       const { data } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`);
-      if (['completed','failed','busy','no-answer','canceled'].includes(data.status) || polls >= 15) {
-        clearInterval(interval);
-        const done = data.status === 'completed' ? 'completed' : 'error';
-        await interaction.editReply({ embeds: [buildOrderEmbed({ ...order, status: done, callSid, error: done === 'error' ? `Call ended: ${data.status}` : null })], components: [] });
+      const status   = data.status;
+
+      // Update embed to show live status while call is in progress
+      if (!TERMINAL.includes(status) && polls % 3 === 0) {
+        // Every 15 seconds update the embed with current status
+        await interaction.editReply({
+          embeds: [buildOrderEmbed({ ...order, status:'calling', callSid, liveStatus: status })],
+          components: [],
+        }).catch(() => {});
       }
-    } catch(e) { clearInterval(interval); }
-  }, 4000);
+
+      // Call finished or timed out
+      if (TERMINAL.includes(status) || polls >= MAX_POLLS) {
+        clearInterval(interval);
+
+        const timedOut = polls >= MAX_POLLS && !TERMINAL.includes(status);
+        const success  = status === 'completed';
+
+        // Final embed
+        const finalEmbed = buildOrderEmbed({
+          ...order,
+          status:   success ? 'completed' : 'error',
+          callSid,
+          error:    timedOut
+            ? 'Call status timed out — check dashboard for result'
+            : (!success ? `Call ended with status: ${status}` : null),
+        });
+
+        await interaction.editReply({ embeds: [finalEmbed], components: [] }).catch(() => {});
+
+        // Post a follow-up outcome message in the channel
+        const outcomeLines = {
+          completed:  `✅ **Call completed** — Alex finished the call with **${order.vendor.name}** for PO \`${order.po}\`.\nCheck your dashboard for order status.`,
+          failed:     `❌ **Call failed** — Could not connect to **${order.vendor.name}**. Try calling again.`,
+          busy:       `📵 **Line busy** — **${order.vendor.name}** was busy. Try again in a few minutes.`,
+          'no-answer':`📭 **No answer** — **${order.vendor.name}** did not pick up. Try again or call directly.`,
+          canceled:   `🚫 **Call canceled** — The call to **${order.vendor.name}** was canceled.`,
+        };
+
+        const outcomeMsg = timedOut
+          ? `⏱️ **Call in progress** — Alex is still on the line with **${order.vendor.name}**. Check the dashboard for the final result.`
+          : (outcomeLines[status] || `ℹ️ Call ended with status: **${status}**`);
+
+        await interaction.followUp({ content: outcomeMsg }).catch(() => {});
+      }
+    } catch(err) {
+      // Don't kill the interval on a single failed request — just log and keep trying
+      console.error(`Poll error (${polls}/${MAX_POLLS}):`, err.message);
+      if (polls >= MAX_POLLS) {
+        clearInterval(interval);
+        await interaction.followUp({ content: `⏱️ Lost track of the call to **${order.vendor.name}**. Check your dashboard for the result.` }).catch(() => {});
+      }
+    }
+  }, POLL_INTERVAL);
 }
 
 client.login(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN);
