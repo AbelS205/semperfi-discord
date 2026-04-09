@@ -1,0 +1,17 @@
+{
+    "name": "semperfi-discord",
+    "version": "1.0.0",
+    "description": "Semper Fi Heating & Cooling Discord ordering bot",
+    "main": "src/index.js",
+    "scripts": {
+          "start": "node src/index.js",
+          "register": "node src/register-commands.js"
+    },
+    "dependencies": {
+          "discord.js": "^14.14.1",
+          "axios": "^1.6.7",
+          "@anthropic-ai/sdk": "^0.20.1",
+          "dotenv": "^16.4.5",
+          "form-data": "^4.0.0"
+    }
+}
