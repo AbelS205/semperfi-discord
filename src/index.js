@@ -13,9 +13,8 @@ const client = new Client({
 
 const BACKEND_URL       = process.env.BACKEND_URL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const CHANNEL_ID        = process.env.DISCORD_CHANNEL_ID; // optional — if set, only listen in this channel
+const CHANNEL_ID        = process.env.DISCORD_CHANNEL_ID;
 
-// Pending orders awaiting confirm/cancel button press
 const pendingOrders = new Map();
 
 // ─────────────────────────────────────────────
@@ -26,11 +25,51 @@ client.once('ready', () => {
 });
 
 // ─────────────────────────────────────────────
+// Brand lookup from model number
+// Called when nameplate vision returns Unknown brand
+// but a model number was found
+// ─────────────────────────────────────────────
+async function lookupBrandFromModel(modelNumber) {
+  try {
+    const resp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages: [{
+        role: 'user',
+        content: `What HVAC brand makes the unit with model number "${modelNumber}"? Search for it and respond ONLY with a JSON object like this, no other text:
+{
+  "brand": "one of: Carrier, Bryant, Payne, Lennox, Allied, Rheem, Ruud, Trane, American Standard, Goodman, Amana, Daikin, York, Bosch, Coleman, Luxaire, JCI, AC Pro, Maytag, or Unknown",
+  "confidence": "high, medium, or low"
+}`
+      }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      }
+    });
+
+    // Extract the text response (may come after tool use blocks)
+    const textBlock = resp.data.content.find(b => b.type === 'text');
+    if (!textBlock) return null;
+
+    const parsed = JSON.parse(textBlock.text.replace(/```json|```/g,'').trim());
+    if (parsed.brand && parsed.brand !== 'Unknown') return parsed.brand;
+    return null;
+  } catch(err) {
+    console.error('Brand lookup error:', err.response?.data || err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
 // Slash commands
 // ─────────────────────────────────────────────
 client.on('interactionCreate', async interaction => {
 
-  // /order — quick structured order
+  // /order
   if (interaction.isChatInputCommand() && interaction.commandName === 'order') {
     const brand = interaction.options.getString('brand');
     const part  = interaction.options.getString('part');
@@ -48,12 +87,10 @@ client.on('interactionCreate', async interaction => {
     const order = { vendor, brand, part, model, qty, po, notes, discordUser: interaction.user.username, discordUserId: interaction.user.id };
     pendingOrders.set(orderId, order);
 
-    const embed = buildOrderEmbed({ ...order, status: 'pending' });
-    const row = buildButtons(orderId);
-    await interaction.reply({ embeds: [embed], components: [row] });
+    await interaction.reply({ embeds: [buildOrderEmbed({ ...order, status: 'pending' })], components: [buildButtons(orderId)] });
   }
 
-  // /vendors — show vendor list
+  // /vendors
   if (interaction.isChatInputCommand() && interaction.commandName === 'vendors') {
     const lines = [
       '**Carrier / Bryant / Payne** → Russell Sigler (702) 384-2996',
@@ -68,7 +105,7 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: lines.join('\n'), ephemeral: true });
   }
 
-  // /callstatus — check a call SID
+  // /callstatus
   if (interaction.isChatInputCommand() && interaction.commandName === 'callstatus') {
     const sid = interaction.options.getString('sid');
     await interaction.deferReply({ ephemeral: true });
@@ -80,7 +117,7 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // Button — confirm or cancel
+  // Buttons — confirm / cancel
   if (interaction.isButton()) {
     const parts   = interaction.customId.split('_');
     const action  = parts[0];
@@ -125,32 +162,28 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ─────────────────────────────────────────────
-// Natural language messages + photo uploads
+// Messages — photo + natural text
 // ─────────────────────────────────────────────
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
-
-  // Channel filter — if CHANNEL_ID is set only listen there, otherwise listen everywhere
   if (CHANNEL_ID && message.channelId !== CHANNEL_ID) return;
-
-  // Ignore slash command attempts typed as text
   if (message.content.startsWith('/')) return;
 
   const hasPhoto = message.attachments.some(a => a.contentType?.startsWith('image/'));
   const hasText  = message.content.trim().length > 0;
-
   if (!hasPhoto && !hasText) return;
 
   // ── Photo upload ──────────────────────────
   if (hasPhoto) {
     const attachment = message.attachments.find(a => a.contentType?.startsWith('image/'));
-    const thinking = await message.reply('📸 Reading nameplate...');
+    const thinking   = await message.reply('📸 Reading nameplate...');
 
     try {
       const imageResp = await axios.get(attachment.url, { responseType: 'arraybuffer' });
       const base64    = Buffer.from(imageResp.data).toString('base64');
       const mediaType = attachment.contentType.split(';')[0];
 
+      // Step 1 — read nameplate with vision
       const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-20250514',
         max_tokens: 600,
@@ -174,34 +207,44 @@ Respond ONLY with this JSON, no other text:
           ]
         }]
       }, {
-        headers: {
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json',
-        }
+        headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
       });
 
       let info;
       try { info = JSON.parse(aiResp.data.content[0].text.replace(/```json|```/g,'').trim()); }
-      catch(e) { info = { brand:'Unknown', model:null, confidence:'low' }; }
+      catch(e) { info = { brand: 'Unknown', model: null, confidence: 'low' }; }
+
+      // Step 2 — if brand is Unknown but model found, look it up
+      let brandLookedUp = false;
+      if ((info.brand === 'Unknown' || !info.brand) && info.model) {
+        await thinking.edit(`📸 Nameplate read — brand not visible on tag. Looking up model **${info.model}**...`);
+        const found = await lookupBrandFromModel(info.model);
+        if (found) {
+          info.brand     = found;
+          info.confidence = 'medium';
+          brandLookedUp  = true;
+        }
+      }
 
       const vendor = getVendorForBrand(info.brand);
 
       const summary = [
-        `**Brand:** ${info.brand}`,
-        info.model       ? `**Model:** ${info.model}`         : null,
-        info.serial      ? `**Serial:** ${info.serial}`       : null,
-        info.type        ? `**Type:** ${info.type}`           : null,
-        info.tonnage     ? `**Tonnage:** ${info.tonnage}`     : null,
-        info.voltage     ? `**Voltage:** ${info.voltage}`     : null,
+        `**Brand:** ${info.brand}${brandLookedUp ? ' *(identified from model number)*' : ''}`,
+        info.model       ? `**Model:** ${info.model}`             : null,
+        info.serial      ? `**Serial:** ${info.serial}`           : null,
+        info.type        ? `**Type:** ${info.type}`               : null,
+        info.tonnage     ? `**Tonnage:** ${info.tonnage}`         : null,
+        info.voltage     ? `**Voltage:** ${info.voltage}`         : null,
         info.refrigerant ? `**Refrigerant:** ${info.refrigerant}` : null,
-        info.mfg_date    ? `**Mfg Date:** ${info.mfg_date}`  : null,
+        info.mfg_date    ? `**Mfg Date:** ${info.mfg_date}`       : null,
         `**Confidence:** ${info.confidence}`,
-        vendor           ? `\n✅ Auto-selected vendor: **${vendor.name}** (${vendor.city})` : `\n❓ Brand not in vendor map — please select manually`,
+        vendor
+          ? `\n✅ Auto-selected vendor: **${vendor.name}** (${vendor.city})`
+          : `\n❓ Brand not in vendor map — please use \`/order\` to specify manually`,
       ].filter(Boolean).join('\n');
 
       if (!vendor || info.brand === 'Unknown') {
-        await thinking.edit(`🔍 Nameplate read:\n${summary}\n\nPlease use \`/order\` and specify the brand manually.`);
+        await thinking.edit(`🔍 Nameplate read:\n${summary}\n\n❓ Could not identify brand${info.model ? ` from model **${info.model}**` : ''}. Please use \`/order\` and specify brand manually.`);
         return;
       }
 
@@ -211,13 +254,11 @@ Respond ONLY with this JSON, no other text:
       const textClean = message.content.replace(/PO[-\s]?\w+/i,'').replace(/[|,]/g,'').trim();
 
       if (po && textClean.length > 3) {
-        // Enough info to build full order
-        const order = { vendor, brand: info.brand, part: textClean, model: info.model || '', qty: 1, po, notes: '', discordUser: message.author.username, discordUserId: message.author.id };
+        const order   = { vendor, brand: info.brand, part: textClean, model: info.model || '', qty: 1, po, notes: '', discordUser: message.author.username, discordUserId: message.author.id };
         const orderId = `photo_${message.id}`;
         pendingOrders.set(orderId, order);
         await thinking.edit({ content: `🔍 Nameplate read:\n${summary}`, embeds: [buildOrderEmbed({ ...order, status: 'pending' })], components: [buildButtons(orderId)] });
       } else {
-        // Store partial, ask for part + PO
         client._partials = client._partials || new Map();
         client._partials.set(`${message.channelId}-${message.author.id}`, { vendor, brand: info.brand, model: info.model || '' });
         await thinking.edit(`🔍 Nameplate read:\n${summary}\n\nNow tell me the **part needed** and **PO number**, e.g.:\n\`capacitor 45/5 MFD | PO-2025-0442\``);
@@ -230,8 +271,7 @@ Respond ONLY with this JSON, no other text:
     return;
   }
 
-  // ── Natural text ──────────────────────────
-  // Check if this is a follow-up to a photo scan
+  // ── Follow-up to photo scan ───────────────
   const partialKey = `${message.channelId}-${message.author.id}`;
   const partial    = client._partials?.get(partialKey);
 
@@ -249,12 +289,11 @@ Respond ONLY with this JSON, no other text:
     const order   = { vendor: partial.vendor, brand: partial.brand, part, model: partial.model, qty: 1, po, notes: '', discordUser: message.author.username, discordUserId: message.author.id };
     const orderId = `partial_${message.id}`;
     pendingOrders.set(orderId, order);
-
-    const reply = await message.reply({ embeds: [buildOrderEmbed({ ...order, status: 'pending' })], components: [buildButtons(orderId)] });
+    await message.reply({ embeds: [buildOrderEmbed({ ...order, status: 'pending' })], components: [buildButtons(orderId)] });
     return;
   }
 
-  // Fresh natural text — parse with Claude
+  // ── Fresh natural text ────────────────────
   const thinking = await message.reply('🤔 Parsing order...');
 
   try {
@@ -279,17 +318,21 @@ Parse this message and respond ONLY with JSON, no other text:
 }`
       }]
     }, {
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      }
+      headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
     });
 
     let parsed;
     try { parsed = JSON.parse(aiResp.data.content[0].text.replace(/```json|```/g,'').trim()); }
-    catch(e) {
-      return thinking.edit('❌ Could not parse that. Try:\n`Carrier capacitor 45/5 MFD PO-2025-0442`');
+    catch(e) { return thinking.edit('❌ Could not parse that. Try:\n`Carrier capacitor 45/5 MFD PO-2025-0442`'); }
+
+    // If brand missing but model present, try to look it up
+    if ((!parsed.brand || parsed.brand === 'null') && parsed.model) {
+      await thinking.edit(`🤔 Brand not mentioned — looking up model **${parsed.model}**...`);
+      const found = await lookupBrandFromModel(parsed.model);
+      if (found) {
+        parsed.brand = found;
+        parsed.missing = (parsed.missing || []).filter(f => f !== 'brand');
+      }
     }
 
     if (parsed.missing?.length > 0) {
@@ -304,7 +347,6 @@ Parse this message and respond ONLY with JSON, no other text:
     const order   = { vendor, brand: parsed.brand, part: parsed.part, model: parsed.model || '', qty: parsed.qty || 1, po: parsed.po, notes: parsed.notes || '', discordUser: message.author.username, discordUserId: message.author.id };
     const orderId = `nlp_${message.id}`;
     pendingOrders.set(orderId, order);
-
     await thinking.edit({ content: '', embeds: [buildOrderEmbed({ ...order, status: 'pending' })], components: [buildButtons(orderId)] });
 
   } catch(err) {
@@ -333,12 +375,12 @@ function buildOrderEmbed({ vendor, brand, part, model, qty, po, notes, status, c
     .setDescription(labels[status] || status)
     .addFields(
       { name: 'Vendor',    value: `${vendor.name} — ${vendor.city}\n${vendor.phone}\n${vendor.addr}`, inline: true },
-      { name: 'Brand',     value: brand || '—',           inline: true },
-      { name: '\u200b',    value: '\u200b',                inline: true },
-      { name: 'Part',      value: part  || '—',           inline: true },
-      { name: 'Qty',       value: String(qty || 1),        inline: true },
-      { name: 'Model',     value: model || '—',           inline: true },
-      { name: 'PO Number', value: po    || '—',           inline: true },
+      { name: 'Brand',     value: brand || '—',        inline: true },
+      { name: '\u200b',    value: '\u200b',             inline: true },
+      { name: 'Part',      value: part  || '—',        inline: true },
+      { name: 'Qty',       value: String(qty || 1),     inline: true },
+      { name: 'Model',     value: model || '—',        inline: true },
+      { name: 'PO Number', value: po    || '—',        inline: true },
     )
     .setFooter({ text: 'Semper Fi Heating & Cooling' })
     .setTimestamp();
@@ -364,5 +406,4 @@ async function pollCallStatus(callSid, interaction, order) {
   }, 4000);
 }
 
-// Use DISCORD_BOT_TOKEN (matches .env.example) with fallback to DISCORD_TOKEN
 client.login(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN);
