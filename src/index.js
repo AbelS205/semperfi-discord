@@ -29,37 +29,96 @@ client.once('ready', () => {
 // Called when nameplate vision returns Unknown brand
 // but a model number was found
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// HVAC model number prefix → brand map
+// Covers the most common residential/light commercial units
+// ─────────────────────────────────────────────
+const MODEL_PREFIXES = [
+  // Carrier family
+  { prefixes: ['24A','24AA','25H','38C','38B','38T','38G','40Q','40R','48X','48G','50X','50N','FK','FV','FE','FA','FB','FX','CH','CA','CB','CC'], brand: 'Carrier' },
+  // Bryant family
+  { prefixes: ['215A','225A','226A','697C','699C','697B','215C','280A','286B','286C','288B','288C','126B','127B','F1AA','F2AA'], brand: 'Bryant' },
+  // Payne
+  { prefixes: ['PA','PH','PC','PG','PF','PL','PM'], brand: 'Payne' },
+  // Lennox family
+  { prefixes: ['XC','XP','XR','SL','EL','ML','CL','HS','HS26','XC21','XC20','XC16','XC15','XC14','XC13','SL18','EL16','ML14','CBX','C33','G61','G71','SLP','SLO'], brand: 'Lennox' },
+  // Allied (Lennox brand)
+  { prefixes: ['AHF','AHD','AHS','ALH','APC','AXA','AWX','SCB','SGF','SGH','SSX','SHX','SSH','SCX','SWC'], brand: 'Allied' },
+  // Champion (York/JCI brand)
+  { prefixes: ['CHA','CHB','CHC','CHD','CHF','CHG','CHH','CHX'], brand: 'York' },
+  // Rheem/Ruud family
+  { prefixes: ['RA','RH','RQ','RS','RT','RP','RC','RK','RPKA','RPKB','RSPM','RSPN','RSPC','RSPA','RA13','RA14','RA15','RA16','RA17','RA18','RA20','RH1P','RH2T','RAKA','RAKB'], brand: 'Rheem' },
+  { prefixes: ['UA','UH','UP','UT','UK','UM','UPKA','UPKB'], brand: 'Ruud' },
+  // Trane/American Standard family
+  { prefixes: ['4T','4A','2T','2A','XR','XL','XB','XC','XN','XS','XP','TWE','TEM','TUD','TUE','TUG','TUH','TUI','TUX','TCB','TAM','TDD','TDX','TXN','XR15','XR13','XL16','XL15','XL14','XL20','4TTR','4TWR','4TVR','4TXR','4TXN','TTA','TTB'], brand: 'Trane' },
+  { prefixes: ['4A7','4A6','4A5','4A4','2A7','2A6','GOLD','PLAT','SILI','4AAZ','4AHP','2AAZ','2AHP','BHB','BHD','BHE','BHG','BHH','GBH','GBG','GBF','GBE','GBD','GBC','GBB','GBA','BHF'], brand: 'American Standard' },
+  // Goodman/Amana/Daikin family
+  { prefixes: ['GSX','GSH','GSC','GPH','GPC','GME','GMH','GMV','GMC','GMS','GMVC','GMVP','GSXC','GSXN','GSXR','GPCH','GPHH','GPHM','AVPTC','ARUF','ASPT','ASUF','CAPF','CAUF','CAPG'], brand: 'Goodman' },
+  { prefixes: ['ASZ','ASX','ASH','ASC','AMV','AMH','AMC','AMS','AMVC','AMVP','AVPTC','ALT','AEH','ACX','ACB','AHH','AHM','AMEC'], brand: 'Amana' },
+  { prefixes: ['DX','DZ','DH','DC','DP','DV','DM','DS','DT','RZQ','RXQ','RKS','RKN','FDMQ','FTXS','FTKN'], brand: 'Daikin' },
+  // York/Coleman/Luxaire/JCI family
+  { prefixes: ['YC','YH','YP','YF','YK','YM','YS','YT','YU','YX','TCG','TCA','TC2','TG8','TG9','TG0','ZM','YZH','YZV','YZF'], brand: 'York' },
+  { prefixes: ['TC','TM','TH','TP','CE','CH','CM','CP','CG','CGH'], brand: 'Coleman' },
+  { prefixes: ['LCA','LCH','LCP','LCG','LCC','LHA','LHH','LHP','YHE','YHH','YHM','YHN'], brand: 'Luxaire' },
+  // Bosch
+  { prefixes: ['BVA','BSH','BSZ','BOVA','BOXV','BCHP','BCSS','IDS'], brand: 'Bosch' },
+  // AC Pro / Maytag
+  { prefixes: ['MHC','MCC','MPC','MPE','MHE','MCA','MPA'], brand: 'Maytag' },
+];
+
+function lookupBrandFromPrefix(modelNumber) {
+  const upper = String(modelNumber).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Sort by prefix length descending so longer prefixes match first
+  const sorted = [...MODEL_PREFIXES].sort((a, b) =>
+    Math.max(...b.prefixes.map(p => p.length)) - Math.max(...a.prefixes.map(p => p.length))
+  );
+  for (const entry of sorted) {
+    for (const prefix of entry.prefixes) {
+      if (upper.startsWith(prefix.toUpperCase())) return entry.brand;
+    }
+  }
+  return null;
+}
+
 async function lookupBrandFromModel(modelNumber) {
+  // Step 1: Try local prefix table first — fast and accurate
+  const localMatch = lookupBrandFromPrefix(modelNumber);
+  if (localMatch) {
+    console.log(`Brand lookup: ${modelNumber} → ${localMatch} (local prefix match)`);
+    return localMatch;
+  }
+
+  // Step 2: Fall back to Claude web search for unknown models
+  console.log(`Brand lookup: ${modelNumber} → not in local table, trying web search`);
   try {
     const resp = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 200,
+      max_tokens: 300,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{
         role: 'user',
-        content: `What HVAC brand makes the unit with model number "${modelNumber}"? Search for it and respond ONLY with a JSON object like this, no other text:
+        content: `What HVAC manufacturer makes the unit with model number "${modelNumber}"? This is a residential or light commercial HVAC unit (air conditioner, heat pump, or furnace). Search for the exact model number to identify the brand. Respond ONLY with JSON, no other text:
 {
-  "brand": "one of: Carrier, Bryant, Payne, Lennox, Allied, Rheem, Ruud, Trane, American Standard, Goodman, Amana, Daikin, York, Bosch, Coleman, Luxaire, JCI, AC Pro, Maytag, or Unknown",
-  "confidence": "high, medium, or low"
+  "brand": "one of: Carrier, Bryant, Payne, Lennox, Allied, Rheem, Ruud, Trane, American Standard, Goodman, Amana, Daikin, York, Coleman, Luxaire, Bosch, JCI, AC Pro, Maytag, or Unknown",
+  "confidence": "high, medium, or low",
+  "reasoning": "brief explanation"
 }`
       }]
     }, {
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      }
+      headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
     });
 
-    // Extract the text response (may come after tool use blocks)
-    const textBlock = resp.data.content.find(b => b.type === 'text');
-    if (!textBlock) return null;
+    // Get last text block (after any tool_use blocks)
+    const textBlocks = resp.data.content.filter(b => b.type === 'text');
+    if (!textBlocks.length) return null;
+    const lastText = textBlocks[textBlocks.length - 1].text;
 
-    const parsed = JSON.parse(textBlock.text.replace(/```json|```/g,'').trim());
-    if (parsed.brand && parsed.brand !== 'Unknown') return parsed.brand;
+    const parsed = JSON.parse(lastText.replace(/```json|```/g,'').trim());
+    console.log(`Brand lookup web result: ${modelNumber} → ${parsed.brand} (${parsed.confidence}) — ${parsed.reasoning}`);
+    if (parsed.brand && parsed.brand !== 'Unknown' && parsed.confidence !== 'low') return parsed.brand;
     return null;
   } catch(err) {
-    console.error('Brand lookup error:', err.response?.data || err.message);
+    console.error('Brand lookup web error:', err.response?.data || err.message);
     return null;
   }
 }
@@ -393,69 +452,79 @@ function buildOrderEmbed({ vendor, brand, part, model, qty, po, notes, status, c
 
 async function pollCallStatus(callSid, interaction, order) {
   let polls = 0;
-  // Poll every 5 seconds for up to 10 minutes (120 polls)
-  // OpenAI Realtime calls can run several minutes
-  const MAX_POLLS    = 120;
+  const MAX_POLLS     = 120;  // 10 minutes at 5s intervals
   const POLL_INTERVAL = 5000;
 
-  // Terminal statuses from Twilio
-  const TERMINAL = ['completed','failed','busy','no-answer','canceled'];
+  // Vapi status values: queued, ringing, in-progress, forwarding, ended
+  const TERMINAL = ['ended'];
 
   const interval = setInterval(async () => {
     polls++;
     try {
       const { data } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`);
-      const status   = data.status;
+      const status = data.status;
 
-      // Update embed to show live status while call is in progress
+      // Update embed every 15 seconds while call is live
       if (!TERMINAL.includes(status) && polls % 3 === 0) {
-        // Every 15 seconds update the embed with current status
         await interaction.editReply({
           embeds: [buildOrderEmbed({ ...order, status:'calling', callSid, liveStatus: status })],
           components: [],
         }).catch(() => {});
       }
 
-      // Call finished or timed out
       if (TERMINAL.includes(status) || polls >= MAX_POLLS) {
         clearInterval(interval);
 
-        const timedOut = polls >= MAX_POLLS && !TERMINAL.includes(status);
-        const success  = status === 'completed';
+        const timedOut  = polls >= MAX_POLLS && !TERMINAL.includes(status);
+        const endReason = data.endedReason || '';
+        const success   = status === 'ended' && !endReason.includes('error') && endReason !== 'voicemail' && endReason !== 'no-answer' && endReason !== 'customer-did-not-answer';
+
+        // Try to get ETA from Vapi call analysis (runs a few seconds after call ends)
+        let eta = null;
+        let summary = null;
+        if (status === 'ended') {
+          try {
+            await new Promise(r => setTimeout(r, 4000)); // wait for analysis
+            const { data: callData } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`);
+            eta     = callData.eta     || null;
+            summary = callData.summary || null;
+          } catch(e) {}
+        }
 
         // Final embed
-        const finalEmbed = buildOrderEmbed({
-          ...order,
-          status:   success ? 'completed' : 'error',
-          callSid,
-          error:    timedOut
-            ? 'Call status timed out — check dashboard for result'
-            : (!success ? `Call ended with status: ${status}` : null),
-        });
+        await interaction.editReply({
+          embeds: [buildOrderEmbed({ ...order, status: success ? 'completed' : 'error', callSid,
+            error: timedOut ? 'Call timed out — check dashboard' : (!success ? `Ended: ${endReason || status}` : null),
+          })],
+          components: [],
+        }).catch(() => {});
 
-        await interaction.editReply({ embeds: [finalEmbed], components: [] }).catch(() => {});
-
-        // Post a follow-up outcome message in the channel
-        const outcomeLines = {
-          completed:  `✅ **Call completed** — Alex finished the call with **${order.vendor.name}** for PO \`${order.po}\`.\nCheck your dashboard for order status.`,
-          failed:     `❌ **Call failed** — Could not connect to **${order.vendor.name}**. Try calling again.`,
-          busy:       `📵 **Line busy** — **${order.vendor.name}** was busy. Try again in a few minutes.`,
-          'no-answer':`📭 **No answer** — **${order.vendor.name}** did not pick up. Try again or call directly.`,
-          canceled:   `🚫 **Call canceled** — The call to **${order.vendor.name}** was canceled.`,
-        };
-
-        const outcomeMsg = timedOut
-          ? `⏱️ **Call in progress** — Alex is still on the line with **${order.vendor.name}**. Check the dashboard for the final result.`
-          : (outcomeLines[status] || `ℹ️ Call ended with status: **${status}**`);
+        // Outcome message with ETA if available
+        let outcomeMsg = '';
+        if (timedOut) {
+          outcomeMsg = `⏱️ **Still tracking** — Alex may still be on the line with **${order.vendor.name}**. Check your dashboard.`;
+        } else if (endReason === 'voicemail') {
+          outcomeMsg = `📬 **Went to voicemail** — **${order.vendor.name}** didn't answer. Try calling back later.`;
+        } else if (endReason === 'customer-did-not-answer' || endReason === 'no-answer') {
+          outcomeMsg = `📭 **No answer** — **${order.vendor.name}** didn't pick up. Try again shortly.`;
+        } else if (endReason?.includes('error')) {
+          outcomeMsg = `❌ **Call error** — ${endReason}. Check your Vapi dashboard.`;
+        } else if (success) {
+          outcomeMsg = `✅ **Call completed** — Alex finished the call with **${order.vendor.name}** for PO \`${order.po}\`.`;
+          if (eta)     outcomeMsg += `\n📦 **ETA: ${eta}**`;
+          if (summary) outcomeMsg += `\n📋 **Summary:** ${summary}`;
+          if (!eta && !summary) outcomeMsg += `\nCheck your dashboard for details.`;
+        } else {
+          outcomeMsg = `⚠️ Call ended — ${endReason || 'unknown reason'}.`;
+        }
 
         await interaction.followUp({ content: outcomeMsg }).catch(() => {});
       }
     } catch(err) {
-      // Don't kill the interval on a single failed request — just log and keep trying
       console.error(`Poll error (${polls}/${MAX_POLLS}):`, err.message);
       if (polls >= MAX_POLLS) {
         clearInterval(interval);
-        await interaction.followUp({ content: `⏱️ Lost track of the call to **${order.vendor.name}**. Check your dashboard for the result.` }).catch(() => {});
+        await interaction.followUp({ content: `⏱️ Lost track of the call to **${order.vendor.name}**. Check your dashboard.` }).catch(() => {});
       }
     }
   }, POLL_INTERVAL);
