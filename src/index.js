@@ -566,6 +566,17 @@ function pollCallStatus(callSid, client, channel, ts, order) {
 }
 
 // ─────────────────────────────────────────────
+// Tiny health server so the Agent Hub can see the bot's status.
+// (Railway: generate a public domain for this service.)
+// ─────────────────────────────────────────────
+require('http').createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ status: 'ok', service: 'Slack Intake Bot', engine: 'Bolt \u00b7 Socket Mode' }));
+  } else { res.writeHead(404); res.end(); }
+}).listen(process.env.PORT || 3000, () => console.log('Health server listening on', process.env.PORT || 3000));
+
+// ─────────────────────────────────────────────
 (async () => {
   await app.start();
   console.log('Semper Fi Slack intake bot online (Socket Mode)');
