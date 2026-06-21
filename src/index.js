@@ -266,8 +266,14 @@ app.event('message', async ({ event, client }) => {
   if (CHANNEL_ID && event.channel !== CHANNEL_ID) return;
   if ((event.text || '').startsWith('/')) return;
 
-  const imageFile = (event.files || []).find(f => (f.mimetype || '').startsWith('image/'));
-  const text = (event.text || '').trim();
+  console.log('msg-event', JSON.stringify({ subtype: event.subtype||null, hasFiles: !!event.files, files: (event.files||[]).map(f=>({mime:f.mimetype, url:!!f.url_private})), text: (event.text||'').slice(0,100) }));
+  let imageFile = (event.files || []).find(f => (f.mimetype || '').startsWith('image/'));
+  let text = (event.text || '').trim();
+  // Fallback: image shared as a Slack file link inside the message text
+  if (!imageFile) {
+    const m = text.match(/https:\/\/files\.slack\.com\/\S+?\.(?:jpe?g|png|gif|webp|heic)/i);
+    if (m) { imageFile = { url_private: m[0], mimetype: 'image/jpeg' }; text = text.replace(m[0], '').trim(); }
+  }
   if (!imageFile && !text) return;
 
   // ── Photo upload ──────────────────────────
