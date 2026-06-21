@@ -92,6 +92,39 @@ async function lookupBrandFromModel(modelNumber) {
 }
 
 // ─────────────────────────────────────────────
+// Flexible part + PO extraction from free-form text
+// Accepts any PO format: "PO-2025-0442", "po 2025 0442",
+// "p.o.12345", "#7788", "order 5566", or a bare number.
+// ─────────────────────────────────────────────
+async function extractPartPO(text) {
+  if (!text || text.trim().length < 2) return { part: null, po: null, qty: 1, notes: null };
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: `Extract the part and purchase order (PO) from this HVAC parts request. The PO can be written ANY way — "PO-2025-0442", "po 2025 0442", "p.o.12345", "#7788", "order 5566", "ref 99", or just a bare number. Pull out the value even if the wording is loose, and treat words like "po", "p.o.", "order", "ref", or a leading "#" as PO markers. Everything that isn't the PO or a quantity is the part. Respond ONLY with JSON, no other text:
+{
+  "part": "the part description, or null",
+  "po": "the PO value, uppercased, keeping internal dashes (e.g. PO-2025-0442 or 12345), or null",
+  "qty": 1,
+  "notes": "any extra notes, or null"
+}
+
+Message: "${text.replace(/"/g, "'")}"`
+      }]
+    }, {
+      headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+    });
+    return JSON.parse(aiResp.data.content[0].text.replace(/```json|```/g, '').trim());
+  } catch(err) {
+    console.error('extractPartPO error:', err.response?.data || err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
 // Block Kit builders (replaces Discord embeds)
 // ─────────────────────────────────────────────
 function buildOrderBlocks({ vendor, brand, part, model, qty, po, notes, status, callSid, error, liveStatus }) {
@@ -306,12 +339,10 @@ Respond ONLY with this JSON, no other text:
         return;
       }
 
-      const poMatch = text.match(/PO[-\s]?\w+/i);
-      const po = poMatch ? poMatch[0].replace(/\s/g,'').toUpperCase() : null;
-      const textClean = text.replace(/PO[-\s]?\w+/i,'').replace(/[|,]/g,'').trim();
+      const extracted = (text && text.trim().length > 2) ? await extractPartPO(text) : null;
 
-      if (po && textClean.length > 3) {
-        const order = { vendor, brand: info.brand, part: textClean, model: info.model || '', qty: 1, po, notes: '', slackUser: event.user };
+      if (extracted && extracted.po && extracted.part) {
+        const order = { vendor, brand: info.brand, part: extracted.part, model: info.model || '', qty: extracted.qty || 1, po: String(extracted.po).toUpperCase(), notes: extracted.notes || '', slackUser: event.user };
         const orderId = `photo_${event.ts}`;
         pendingOrders.set(orderId, order);
         const card = orderCard(order, 'pending');
@@ -321,7 +352,7 @@ Respond ONLY with this JSON, no other text:
         ]});
       } else {
         partials.set(`${event.channel}-${event.user}`, { vendor, brand: info.brand, model: info.model || '' });
-        await edit(`🔍 Nameplate read:\n${summary}\n\nNow tell me the *part needed* and *PO number*, e.g.:\n\`capacitor 45/5 MFD | PO-2025-0442\``);
+        await edit(`🔍 Nameplate read:\n${summary}\n\nNow send me the *part* and a *PO number* — any format is fine, e.g. \`45/5 MFD capacitor, PO 2025-0442\` or \`contactor #7788\`.`);
       }
     } catch(err) {
       console.error('Photo error:', err.response?.data || err.message);
@@ -334,15 +365,15 @@ Respond ONLY with this JSON, no other text:
   const partialKey = `${event.channel}-${event.user}`;
   const partial = partials.get(partialKey);
   if (partial) {
-    const poMatch = text.match(/PO[-\s]?\w+/i);
-    const po = poMatch ? poMatch[0].replace(/\s/g,'').toUpperCase() : null;
-    const part = text.replace(/PO[-\s]?\w+/i,'').replace(/[|,]/g,'').trim();
+    const extracted = await extractPartPO(text);
+    const po = extracted?.po ? String(extracted.po).toUpperCase() : null;
+    const part = extracted?.part || null;
     if (!po || !part) {
-      await client.chat.postMessage({ channel: event.channel, text: 'Please include both the part and PO, e.g. `capacitor 45/5 MFD | PO-2025-0442`' });
+      await client.chat.postMessage({ channel: event.channel, text: 'I just need a *part* and a *PO number* — any format works, e.g. `45/5 MFD capacitor PO 2025-0442` or `contactor #7788`.' });
       return;
     }
     partials.delete(partialKey);
-    const order = { vendor: partial.vendor, brand: partial.brand, part, model: partial.model, qty: 1, po, notes: '', slackUser: event.user };
+    const order = { vendor: partial.vendor, brand: partial.brand, part, model: partial.model, qty: extracted.qty || 1, po, notes: extracted.notes || '', slackUser: event.user };
     const orderId = `partial_${event.ts}`;
     pendingOrders.set(orderId, order);
     const card = orderCard(order, 'pending');
@@ -369,7 +400,7 @@ Parse this message and respond ONLY with JSON, no other text:
   "part": "part description or null",
   "model": "model number or null",
   "qty": 1,
-  "po": "PO number or null",
+  "po": "PO/order number in ANY format (PO-2025-0442, 'po 2025 0442', '#7788', 'order 5566', or a bare number), or null",
   "notes": "any extra notes or null",
   "missing": ["list missing required fields from: brand, part, po"]
 }`
@@ -531,5 +562,5 @@ function pollCallStatus(callSid, client, channel, ts, order) {
 // ─────────────────────────────────────────────
 (async () => {
   await app.start();
-  console.log('Semper Fi Slack bot online (Socket Mode)');
+  console.log('Semper Fi Slack intake bot online (Socket Mode)');
 })();
