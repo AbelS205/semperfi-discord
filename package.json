@@ -1,14 +1,13 @@
 {
-  "name": "semperfi-discord-bot",
-  "version": "1.1.0",
-  "description": "Semper Fi Heating & Cooling — Discord ordering bot",
+  "name": "semperfi-slack",
+  "version": "1.0.0",
+  "description": "Semper Fi parts ordering — Slack intake bot",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "register": "node src/register-commands.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
+    "@slack/bolt": "^3.19.0",
     "axios": "^1.6.7",
     "dotenv": "^16.4.5"
   }
