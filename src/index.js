@@ -63,7 +63,7 @@ async function lookupBrandFromModel(modelNumber) {
   console.log(`Brand lookup: ${modelNumber} → not in local table, trying web search`);
   try {
     const resp = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 300,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{
@@ -250,7 +250,7 @@ app.event('message', async ({ event, client }) => {
       const mediaType = (imageFile.mimetype || 'image/jpeg').split(';')[0];
 
       const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 600,
         messages: [{
           role: 'user',
@@ -355,7 +355,7 @@ Respond ONLY with this JSON, no other text:
   const edit = (msg) => client.chat.update({ channel: event.channel, ts: thinking.ts, text: typeof msg === 'string' ? msg : msg.text, blocks: msg.blocks }).catch(() => {});
   try {
     const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 400,
       messages: [{
         role: 'user',
