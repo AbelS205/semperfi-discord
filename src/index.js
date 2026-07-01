@@ -4,6 +4,11 @@ const axios = require('axios');
 const { getVendorForBrand } = require('./vendors');
 
 const BACKEND_URL = process.env.BACKEND_URL;
+// Shared secret so this bot can authenticate to the backend's protected endpoints
+// (place-order, call-status) without a user login cookie. Must match INTERNAL_API_KEY
+// set on the backend service. Only ever sent to BACKEND_URL — never to third parties.
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || '';
+const ikHeaders = { 'x-internal-key': INTERNAL_API_KEY };
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CHANNEL_ID = process.env.SLACK_CHANNEL_ID; // optional: restrict bot to one channel
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -250,7 +255,7 @@ app.command('/callstatus', async ({ ack, command, respond }) => {
   const sid = (command.text || '').trim();
   if (!sid) return respond({ response_type: 'ephemeral', text: 'Usage: `/callstatus <call sid>`' });
   try {
-    const { data } = await axios.get(`${BACKEND_URL}/api/call-status/${sid}`);
+    const { data } = await axios.get(`${BACKEND_URL}/api/call-status/${sid}`, { headers: ikHeaders });
     await respond({ response_type: 'ephemeral', text: `📞 *${sid}*\nStatus: *${data.status}*${data.duration ? `\nDuration: ${data.duration}s` : ''}` });
   } catch(err) {
     await respond({ response_type: 'ephemeral', text: `❌ ${err.message}` });
@@ -484,7 +489,7 @@ app.action(/^confirm_/, async ({ ack, body, action, client }) => {
       notes: order.notes,
       discordUser: order.slackUser,   // backend column name; carries the Slack user id
       discordUserId: order.slackUser,
-    });
+    }, { headers: ikHeaders });
     card = orderCard(order, 'placed', { callSid: data.callSid });
     await client.chat.update({ channel, ts, text: card.text, blocks: card.blocks }).catch(() => {});
     pollCallStatus(data.callSid, client, channel, ts, order);
@@ -506,7 +511,7 @@ function pollCallStatus(callSid, client, channel, ts, order) {
   const interval = setInterval(async () => {
     polls++;
     try {
-      const { data } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`);
+      const { data } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`, { headers: ikHeaders });
       const status = data.status;
 
       if (!TERMINAL.includes(status) && polls % 3 === 0) {
@@ -524,7 +529,7 @@ function pollCallStatus(callSid, client, channel, ts, order) {
         if (status === 'ended') {
           try {
             await new Promise(r => setTimeout(r, 4000));
-            const { data: callData } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`);
+            const { data: callData } = await axios.get(`${BACKEND_URL}/api/call-status/${callSid}`, { headers: ikHeaders });
             eta = callData.eta || null;
             summary = callData.summary || null;
           } catch(e) {}
