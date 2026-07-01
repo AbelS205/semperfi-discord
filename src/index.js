@@ -9,6 +9,9 @@ const BACKEND_URL = process.env.BACKEND_URL;
 // set on the backend service. Only ever sent to BACKEND_URL — never to third parties.
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || '';
 const ikHeaders = { 'x-internal-key': INTERNAL_API_KEY };
+// Nameplate specs (beyond brand/model) captured off the data tag, carried onto the order so the
+// backend can store them and the dashboard card can show what the tech saw.
+const specsFrom = (info) => ({ serial: info.serial || null, type: info.type || null, tonnage: info.tonnage || null, voltage: info.voltage || null, refrigerant: info.refrigerant || null, mfg_date: info.mfg_date || null });
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CHANNEL_ID = process.env.SLACK_CHANNEL_ID; // optional: restrict bot to one channel
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -283,7 +286,7 @@ app.event('message', async ({ event, client }) => {
 
   // ── Photo upload ──────────────────────────
   if (imageFile) {
-    const thinking = await client.chat.postMessage({ channel: event.channel, text: '📸 Reading nameplate...' });
+    const thinking = await client.chat.postMessage({ channel: event.channel, thread_ts: event.ts, text: '📸 Reading nameplate...' });
     const edit = (msg) => client.chat.update({ channel: event.channel, ts: thinking.ts, text: typeof msg === 'string' ? msg : msg.text, blocks: msg.blocks }).catch(() => {});
     try {
       const imageResp = await axios.get(imageFile.url_private, {
@@ -353,7 +356,7 @@ Respond ONLY with this JSON, no other text:
       const extracted = (text && text.trim().length > 2) ? await extractPartPO(text) : null;
 
       if (extracted && extracted.po && extracted.part) {
-        const order = { vendor, brand: info.brand, part: extracted.part, model: info.model || '', qty: extracted.qty || 1, po: String(extracted.po).toUpperCase(), notes: extracted.notes || '', slackUser: event.user };
+        const order = { vendor, brand: info.brand, part: extracted.part, model: info.model || '', qty: extracted.qty || 1, po: String(extracted.po).toUpperCase(), notes: extracted.notes || '', slackUser: event.user, specs: specsFrom(info) };
         const orderId = `photo_${event.ts}`;
         pendingOrders.set(orderId, order);
         const card = orderCard(order, 'pending');
@@ -362,7 +365,7 @@ Respond ONLY with this JSON, no other text:
           ...card.blocks, buildButtons(orderId),
         ]});
       } else {
-        partials.set(`${event.channel}-${event.user}`, { vendor, brand: info.brand, model: info.model || '' });
+        partials.set(`${event.channel}-${event.user}`, { vendor, brand: info.brand, model: info.model || '', specs: specsFrom(info), photoTs: event.ts });
         await edit(`🔍 Nameplate read:\n${summary}\n\nNow send me the *part* and a *PO number* — any format is fine, e.g. \`45/5 MFD capacitor, PO 2025-0442\` or \`contactor #7788\`.`);
       }
     } catch(err) {
@@ -384,11 +387,11 @@ Respond ONLY with this JSON, no other text:
       return;
     }
     partials.delete(partialKey);
-    const order = { vendor: partial.vendor, brand: partial.brand, part, model: partial.model, qty: extracted.qty || 1, po, notes: extracted.notes || '', slackUser: event.user };
+    const order = { vendor: partial.vendor, brand: partial.brand, part, model: partial.model, qty: extracted.qty || 1, po, notes: extracted.notes || '', slackUser: event.user, specs: partial.specs };
     const orderId = `partial_${event.ts}`;
     pendingOrders.set(orderId, order);
     const card = orderCard(order, 'pending');
-    await client.chat.postMessage({ channel: event.channel, text: card.text, blocks: [...card.blocks, buildButtons(orderId)] });
+    await client.chat.postMessage({ channel: event.channel, thread_ts: partial.photoTs, text: card.text, blocks: [...card.blocks, buildButtons(orderId)] });
     return;
   }
 
@@ -489,6 +492,7 @@ app.action(/^confirm_/, async ({ ack, body, action, client }) => {
       notes: order.notes,
       discordUser: order.slackUser,   // backend column name; carries the Slack user id
       discordUserId: order.slackUser,
+      specs: order.specs || null,     // nameplate details for the dashboard card
     }, { headers: ikHeaders });
     card = orderCard(order, 'placed', { callSid: data.callSid });
     await client.chat.update({ channel, ts, text: card.text, blocks: card.blocks }).catch(() => {});
